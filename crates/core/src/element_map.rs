@@ -33,6 +33,10 @@ pub struct FilterSpec {
 pub struct LocatorRecommendation {
     pub selector: String,
     pub strategy: String,
+    /// Reliability of the recommended **selector** — how trustworthy the chosen
+    /// locator is, driven by `strategy` (see [`selector_stability_score`]).
+    /// Distinct from [`ElementNode::confidence`]; both rank a `data-testid`
+    /// highest but live on different scales.
     pub confidence: f64,
 }
 
@@ -45,6 +49,10 @@ pub struct ElementNode {
     pub signature: Signature,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cluster_id: Option<String>,
+    /// Structural confidence of the element **signature** (used by healing and
+    /// clustering), from [`stability_confidence`]. This is NOT the selector
+    /// reliability — that is [`LocatorRecommendation::confidence`]. Both are
+    /// monotonic by quality (`data-testid` ≥ `id` ≥ `data-id` ≥ text ≥ none).
     pub confidence: f64,
     pub locator: LocatorRecommendation,
 }
@@ -322,6 +330,8 @@ fn escape_css_attr(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// Reliability of the recommended **selector**, by the strongest attribute.
+/// Monotonic: `data-testid` > `id` > `data-id` > none.
 fn selector_stability_score(element: &DOMElementInfo) -> f64 {
     if element.attributes.contains_key("data-testid") {
         0.95
@@ -334,6 +344,9 @@ fn selector_stability_score(element: &DOMElementInfo) -> f64 {
     }
 }
 
+/// Structural confidence of the element **signature** (for healing/clustering).
+/// Monotonic by quality so it never inverts against [`selector_stability_score`]:
+/// `data-testid` > `id` > `data-id` > text-only > none.
 fn stability_confidence(signature: &Signature) -> f64 {
     let mut score: f64 = 0.5;
     if signature.stable_attrs.contains_key("data-testid") {
@@ -341,6 +354,10 @@ fn stability_confidence(signature: &Signature) -> f64 {
     }
     if signature.stable_attrs.contains_key("id") {
         score += 0.15;
+    }
+    // Previously omitted, which made a data-id element tie with a no-signal one.
+    if signature.stable_attrs.contains_key("data-id") {
+        score += 0.1;
     }
     if signature
         .text_content
@@ -422,5 +439,47 @@ mod tests {
         );
         assert_eq!(filtered.elements.len(), 1);
         assert_eq!(filtered.elements[0].tag, "button");
+    }
+
+    // issue #09: the node confidence and the locator confidence are two distinct
+    // scales, but neither may invert against element quality, and a data-id must
+    // not tie with a no-signal element.
+    #[test]
+    fn confidence_scales_are_monotonic_and_consistent() {
+        let mk = |attrs: &[(&str, &str)], text: Option<&str>| {
+            let snap = DOMSnapshot {
+                html: String::new(),
+                elements: vec![DOMElementInfo {
+                    selector: "x".into(),
+                    tag: "button".into(),
+                    attributes: attrs
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect(),
+                    text_content: text.map(|t| t.to_string()),
+                    path: vec!["button:-".into()],
+                    position_in_parent: None,
+                }],
+            };
+            let m = build_element_map(&snap, &MapOptions::default());
+            let e = &m.elements[0];
+            (e.confidence, e.locator.confidence)
+        };
+
+        let testid = mk(&[("data-testid", "x")], None);
+        let id = mk(&[("id", "x")], None);
+        let data_id = mk(&[("data-id", "x")], None);
+        let text = mk(&[], Some("Buy"));
+        let none = mk(&[], None);
+
+        // node (structural) scale strictly decreasing by quality
+        assert!(testid.0 > id.0 && id.0 > data_id.0 && data_id.0 > text.0 && text.0 > none.0);
+        // the bug this fixes: data-id must beat a no-signal element
+        assert!(data_id.0 > none.0);
+        // locator scale monotonic (non-strict)
+        assert!(testid.1 >= id.1 && id.1 >= data_id.1 && data_id.1 >= none.1);
+        // no inversion: both scales rank testid >= id >= data-id
+        assert!(testid.0 >= id.0 && testid.1 >= id.1);
+        assert!(id.0 >= data_id.0 && id.1 >= data_id.1);
     }
 }
