@@ -82,25 +82,11 @@ pub struct ElementMap {
 }
 
 pub fn recommend_locator(element: &DOMElementInfo) -> LocatorRecommendation {
-    let selector = best_selector(element);
-    let confidence = selector_stability_score(element);
-    let strategy = if element.attributes.contains_key("data-testid") {
-        "data-testid"
-    } else if element.attributes.contains_key("id") {
-        "id"
-    } else if element.attributes.contains_key("data-id") {
-        "data-id"
-    } else if element.attributes.contains_key("name") {
-        "name"
-    } else {
-        "css"
-    }
-    .to_string();
-
+    let (strategy, selector) = pick_locator(element);
     LocatorRecommendation {
-        selector: selector.clone(),
-        strategy,
-        confidence,
+        selector,
+        strategy: strategy.to_string(),
+        confidence: strategy_score(strategy),
     }
 }
 
@@ -296,22 +282,83 @@ fn is_interactive_tag(tag: &str) -> bool {
     INTERACTIVE_TAGS.contains(&tag.to_lowercase().as_str())
 }
 
-fn best_selector(element: &DOMElementInfo) -> String {
+/// Picks the most stable locator for an element and returns `(strategy, selector)`.
+///
+/// The returned selector is always a valid Playwright selector. In particular it
+/// never produces the jQuery/Sizzle `:contains()` pseudo-class, which Playwright
+/// does not support. When no stable attribute is available it falls back to
+/// `aria-label`, then a valid `:has-text(...)` text selector (only for clean,
+/// static labels), and finally a structural selector.
+fn pick_locator(element: &DOMElementInfo) -> (&'static str, String) {
     if let Some(testid) = element.attributes.get("data-testid") {
-        return format!("[data-testid=\"{testid}\"]");
+        return ("data-testid", format!("[data-testid=\"{}\"]", escape_css_attr(testid)));
     }
     if let Some(id) = element.attributes.get("id") {
         if !looks_generated_id(id) {
-            return format!("#{}", escape_css_attr(id));
+            return ("id", format!("#{}", escape_css_attr(id)));
         }
     }
     if let Some(data_id) = element.attributes.get("data-id") {
-        return format!("[data-id=\"{data_id}\"]");
+        return ("data-id", format!("[data-id=\"{}\"]", escape_css_attr(data_id)));
     }
     if let Some(name) = element.attributes.get("name") {
-        return format!("[name=\"{name}\"]");
+        return ("name", format!("[name=\"{}\"]", escape_css_attr(name)));
     }
-    element.selector.clone()
+    if let Some(label) = element.attributes.get("aria-label") {
+        let label = label.trim();
+        if !label.is_empty() {
+            return (
+                "aria-label",
+                format!("{}[aria-label=\"{}\"]", element.tag, escape_css_attr(label)),
+            );
+        }
+    }
+    if let Some(text) = element.text_content.as_deref().and_then(usable_text) {
+        // Valid Playwright text pseudo-class — NOT the jQuery `:contains`.
+        return ("text", format!("{}:has-text(\"{}\")", element.tag, escape_css_attr(&text)));
+    }
+    ("structural", structural_selector(element))
+}
+
+/// Returns a cleaned label if the visible text can be safely used inside a
+/// locator, otherwise `None`. Rejects empty text, CSS/JS leaked from
+/// `<style>`/`<script>`, and dynamic/personal values such as amounts.
+fn usable_text(raw: &str) -> Option<String> {
+    let text = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.is_empty() || text.chars().count() > 40 {
+        return None;
+    }
+    if looks_like_css(&text) || looks_dynamic(&text) {
+        return None;
+    }
+    Some(text)
+}
+
+/// Heuristic for CSS/JS text that leaked from inline `<style>`/`<script>`.
+fn looks_like_css(text: &str) -> bool {
+    (text.contains('{') && text.contains(':'))
+        || text.contains("clip-path")
+        || text.contains("fill-opacity")
+}
+
+/// Heuristic for dynamic/per-user values (amounts, currency, number-dominant
+/// strings) that should not be hard-coded into a locator.
+fn looks_dynamic(text: &str) -> bool {
+    if text.chars().any(|c| matches!(c, '₽' | '$' | '€' | '%')) {
+        return true;
+    }
+    let digits = text.chars().filter(|c| c.is_ascii_digit()).count();
+    let letters = text.chars().filter(|c| c.is_alphabetic()).count();
+    digits > 0 && digits >= letters
+}
+
+/// Last-resort valid CSS selector. Not necessarily unique; the low confidence
+/// and the `structural` strategy tell the consumer it is weak.
+fn structural_selector(element: &DOMElementInfo) -> String {
+    match element.position_in_parent {
+        Some(pos) => format!("{}:nth-of-type({})", element.tag, pos + 1),
+        None => element.tag.clone(),
+    }
 }
 
 fn looks_generated_id(id: &str) -> bool {
@@ -322,15 +369,15 @@ fn escape_css_attr(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-fn selector_stability_score(element: &DOMElementInfo) -> f64 {
-    if element.attributes.contains_key("data-testid") {
-        0.95
-    } else if element.attributes.contains_key("id") {
-        0.85
-    } else if element.attributes.contains_key("data-id") {
-        0.8
-    } else {
-        0.5
+fn strategy_score(strategy: &str) -> f64 {
+    match strategy {
+        "data-testid" => 0.95,
+        "id" => 0.85,
+        "data-id" => 0.8,
+        "name" => 0.7,
+        "aria-label" => 0.65,
+        "text" => 0.55,
+        _ => 0.4,
     }
 }
 
@@ -422,5 +469,89 @@ mod tests {
         );
         assert_eq!(filtered.elements.len(), 1);
         assert_eq!(filtered.elements[0].tag, "button");
+    }
+
+    fn el(tag: &str, attrs: &[(&str, &str)], text: Option<&str>) -> DOMElementInfo {
+        DOMElementInfo {
+            selector: format!("{tag}:contains(\"junk\")"), // simulate adapter passthrough
+            tag: tag.to_string(),
+            attributes: attrs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            text_content: text.map(|t| t.to_string()),
+            path: vec![format!("{tag}:-")],
+            position_in_parent: Some(0),
+        }
+    }
+
+    // issue #01: recommended selector must never contain the jQuery `:contains`.
+    #[test]
+    fn never_emits_contains_pseudo_class() {
+        let cases = [
+            el("button", &[], None),                          // no signal
+            el("a", &[], Some("Search")),                     // text only
+            el("button", &[], Some("")),                      // empty text
+            el("a", &[("aria-label", "Open menu")], None),    // aria-label
+        ];
+        for e in cases {
+            let rec = recommend_locator(&e);
+            assert!(
+                !rec.selector.contains(":contains("),
+                "selector still uses :contains -> {}",
+                rec.selector
+            );
+        }
+    }
+
+    // issue #01: plain text falls back to a valid Playwright `:has-text`.
+    #[test]
+    fn text_fallback_uses_has_text() {
+        let rec = recommend_locator(&el("a", &[], Some("Pay by QR")));
+        assert_eq!(rec.strategy, "text");
+        assert_eq!(rec.selector, "a:has-text(\"Pay by QR\")");
+    }
+
+    // issue #01/#07: aria-label is preferred over visible text.
+    #[test]
+    fn aria_label_preferred_over_text() {
+        let rec = recommend_locator(&el("button", &[("aria-label", "Log out")], Some("X")));
+        assert_eq!(rec.strategy, "aria-label");
+        assert_eq!(rec.selector, "button[aria-label=\"Log out\"]");
+    }
+
+    // issue #06: empty text must not become `:has-text("")`; it goes structural.
+    #[test]
+    fn empty_text_is_not_locatable_by_text() {
+        let rec = recommend_locator(&el("button", &[], Some("   ")));
+        assert_eq!(rec.strategy, "structural");
+        assert!(!rec.selector.contains("has-text"));
+        assert!(rec.confidence <= 0.5);
+    }
+
+    // issue #08: CSS leaked from <style> must not be used as a text locator.
+    #[test]
+    fn css_text_is_rejected() {
+        let rec = recommend_locator(&el("a", &[], Some(".B{clip-path:url(#C)}.C{fill:#000}")));
+        assert_eq!(rec.strategy, "structural");
+        assert!(!rec.selector.contains("has-text"));
+    }
+
+    // issue #07: dynamic/amount-like text must not be hard-coded into a locator.
+    #[test]
+    fn dynamic_amount_text_is_rejected() {
+        for amount in ["12 345 ₽", "1000", "−500 руб"] {
+            let rec = recommend_locator(&el("span", &[], Some(amount)));
+            assert_eq!(rec.strategy, "structural", "value leaked: {amount}");
+        }
+    }
+
+    // stable attributes keep their priority and exact selector form.
+    #[test]
+    fn stable_attributes_keep_priority() {
+        let rec = recommend_locator(&el("button", &[("data-testid", "pay")], Some("Pay")));
+        assert_eq!(rec.strategy, "data-testid");
+        assert_eq!(rec.selector, "[data-testid=\"pay\"]");
+        assert_eq!(rec.confidence, 0.95);
     }
 }
