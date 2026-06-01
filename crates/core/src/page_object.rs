@@ -100,6 +100,9 @@ fn generate_java_playwright(map: &ElementMap, options: &GenerateOptions) -> Stri
     writeln!(out, "    }}").unwrap();
 
     let mut emitted_clusters = std::collections::HashSet::new();
+    // Members emitted via a cluster `items(index)` accessor are not emitted again
+    // as individual methods.
+    let mut clustered_member_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
     for cluster in &map.clusters {
         if cluster.cluster_type != ClusterType::List || cluster.element_ids.len() < 2 {
@@ -108,31 +111,37 @@ fn generate_java_playwright(map: &ElementMap, options: &GenerateOptions) -> Stri
         if !emitted_clusters.insert(cluster.id.clone()) {
             continue;
         }
-        let method = cluster_method_name(&cluster.prefix_signature);
-        let sample = cluster
-            .element_ids
-            .first()
-            .and_then(|id| map.elements.iter().find(|e| &e.id == id));
-        if let Some(el) = sample {
-            writeln!(
-                out,
-                "\n    /** Cluster `{}` ({} elements) */",
-                cluster.id,
-                cluster.element_ids.len()
-            )
-            .unwrap();
-            writeln!(out, "    public Locator {}(int index) {{", method).unwrap();
-            writeln!(
-                out,
-                "        return page.locator(\"{}\").nth(index);",
-                escape_java_string(&el.recommended_selector)
-            )
-            .unwrap();
-            writeln!(out, "    }}").unwrap();
+        for id in &cluster.element_ids {
+            clustered_member_ids.insert(id.as_str());
         }
+        let method = cluster_method_name(&cluster.prefix_signature);
+        let list_selector = cluster_list_selector(cluster, map);
+        writeln!(
+            out,
+            "\n    /** Cluster `{}` ({} elements) */",
+            cluster.id,
+            cluster.element_ids.len()
+        )
+        .unwrap();
+        writeln!(out, "    public Locator {}(int index) {{", method).unwrap();
+        writeln!(
+            out,
+            "        return page.locator(\"{}\").nth(index);",
+            escape_java_string(&list_selector)
+        )
+        .unwrap();
+        writeln!(out, "    }}").unwrap();
     }
 
+    // Dedup individual methods by selector so the same locator is not emitted twice.
+    let mut emitted_selectors: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for element in &map.elements {
+        if clustered_member_ids.contains(element.id.as_str()) {
+            continue;
+        }
+        if !emitted_selectors.insert(element.recommended_selector.as_str()) {
+            continue;
+        }
         let method = element_method_name(element);
         writeln!(
             out,
@@ -174,6 +183,46 @@ fn cluster_method_name(prefix: &str) -> String {
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect();
     to_camel_case(&format!("cluster_{sanitized}"))
+}
+
+/// Builds a selector that matches ALL members of a list cluster.
+///
+/// If every member shares the same recommended selector (e.g. a repeated
+/// `[data-testid="remove-btn"]`), that selector is used. Otherwise members are
+/// unique (e.g. different ids), so a structural descendant selector from the
+/// common path prefix is used — this is what makes `items(index)` resolve every
+/// member instead of just one.
+fn cluster_list_selector(cluster: &crate::element_map::Cluster, map: &ElementMap) -> String {
+    let selectors: Vec<&str> = cluster
+        .element_ids
+        .iter()
+        .filter_map(|id| map.elements.iter().find(|e| &e.id == id))
+        .map(|e| e.recommended_selector.as_str())
+        .collect();
+
+    if let Some(first) = selectors.first() {
+        if selectors.iter().all(|s| s == first) {
+            return (*first).to_string();
+        }
+    }
+    prefix_to_css(&cluster.prefix_signature)
+}
+
+/// Turns a path prefix signature like `div:->div:->aside:->nav:->a:-` into a
+/// descendant CSS selector `div div aside nav a`.
+fn prefix_to_css(prefix: &str) -> String {
+    let css = prefix
+        .split('>')
+        .filter_map(|token| token.split(':').next())
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if css.is_empty() {
+        "*".to_string()
+    } else {
+        css
+    }
 }
 
 fn to_camel_case(input: &str) -> String {
@@ -236,5 +285,119 @@ mod tests {
         assert!(source.contains("public class CheckoutPage"));
         assert!(source.contains("package com.example.pages"));
         assert!(source.contains("page.locator"));
+    }
+
+    fn el(selector: &str, tag: &str, attrs: &[(&str, &str)], path: &[&str]) -> crate::DOMElementInfo {
+        crate::DOMElementInfo {
+            selector: selector.to_string(),
+            tag: tag.to_string(),
+            attributes: attrs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            text_content: None,
+            path: path.iter().map(|s| s.to_string()).collect(),
+            position_in_parent: Some(0),
+        }
+    }
+
+    fn gen(map: &ElementMap) -> String {
+        generate_page_object(map, &GenerateOptions::default()).files[0]
+            .content
+            .clone()
+    }
+
+    #[test]
+    fn prefix_to_css_builds_descendant_selector() {
+        assert_eq!(prefix_to_css("div:->div:->aside:->nav:->a:-"), "div div aside nav a");
+        assert_eq!(prefix_to_css(""), "*");
+    }
+
+    // issue #02: a list accessor must match all members, not the first member's
+    // unique id. Members with different ids -> structural shared selector.
+    #[test]
+    fn cluster_accessor_uses_shared_structural_selector() {
+        let snapshot = DOMSnapshot {
+            html: String::new(),
+            elements: vec![
+                el("a[id=\"nav-1\"]", "a", &[("id", "nav-1")], &["div:-", "nav:-", "a:-"]),
+                el("a[id=\"nav-2\"]", "a", &[("id", "nav-2")], &["div:-", "nav:-", "a:-"]),
+                el("a[id=\"nav-3\"]", "a", &[("id", "nav-3")], &["div:-", "nav:-", "a:-"]),
+            ],
+        };
+        let map = build_element_map(&snapshot, &MapOptions::default());
+        let src = gen(&map);
+        assert!(src.contains(".nth(index)"), "expected a cluster accessor");
+        assert!(
+            src.contains("page.locator(\"div nav a\").nth(index)"),
+            "accessor should use the shared structural selector:\n{src}"
+        );
+        // the unique first-member id must NOT be the list selector
+        assert!(
+            !src.contains("#nav-1\").nth(index)"),
+            "list accessor still uses a unique member id:\n{src}"
+        );
+    }
+
+    // issue #02: when all members share the same selector, reuse it.
+    #[test]
+    fn cluster_accessor_reuses_shared_testid() {
+        let snapshot = DOMSnapshot {
+            html: String::new(),
+            elements: vec![
+                el("x", "button", &[("data-testid", "remove-btn")], &["ul:-", "li:-", "button:-"]),
+                el("x", "button", &[("data-testid", "remove-btn")], &["ul:-", "li:-", "button:-"]),
+            ],
+        };
+        let map = build_element_map(&snapshot, &MapOptions::default());
+        let src = gen(&map);
+        assert!(
+            src.contains("page.locator(\"[data-testid=\\\"remove-btn\\\"]\").nth(index)"),
+            "shared testid should be reused as the list selector:\n{src}"
+        );
+    }
+
+    // issue #04: identical selectors must not become many methods.
+    #[test]
+    fn duplicate_selectors_are_deduped() {
+        // six buttons, same data-testid, but each in a different container -> not
+        // one cluster, so they reach the individual-method loop.
+        let elements = (0..6)
+            .map(|i| {
+                let path = [format!("section{i}:-"), "button:-".to_string()];
+                crate::DOMElementInfo {
+                    selector: "x".to_string(),
+                    tag: "button".to_string(),
+                    attributes: [("data-testid".to_string(), "remove-btn".to_string())].into(),
+                    text_content: None,
+                    path: path.to_vec(),
+                    position_in_parent: Some(0),
+                }
+            })
+            .collect();
+        let map = build_element_map(&DOMSnapshot { html: String::new(), elements }, &MapOptions::default());
+        let src = gen(&map);
+        let count = src.matches("[data-testid=\\\"remove-btn\\\"]\");").count();
+        assert_eq!(count, 1, "expected exactly one deduped method, got {count}:\n{src}");
+    }
+
+    // issue #04: members emitted via items(index) are not emitted again as
+    // individual methods.
+    #[test]
+    fn cluster_members_not_emitted_individually() {
+        let snapshot = DOMSnapshot {
+            html: String::new(),
+            elements: vec![
+                el("a[id=\"nav-1\"]", "a", &[("id", "nav-1")], &["div:-", "nav:-", "a:-"]),
+                el("a[id=\"nav-2\"]", "a", &[("id", "nav-2")], &["div:-", "nav:-", "a:-"]),
+            ],
+        };
+        let map = build_element_map(&snapshot, &MapOptions::default());
+        let src = gen(&map);
+        // no individual (non-nth) method for a member id
+        assert!(
+            !src.contains("page.locator(\"#nav-1\");"),
+            "cluster member should not get its own method:\n{src}"
+        );
     }
 }

@@ -117,7 +117,13 @@ impl ParseTree {
             return &mut node.clusters[idx];
         }
 
-        let new_cluster = ClusterNode::new(signature.prefix.clone());
+        // The cluster id is derived from the prefix, which can be shared by
+        // different leaf tags. Append the leaf tag so a split here stays split
+        // when callers group by `cluster.id`.
+        let mut new_cluster = ClusterNode::new(signature.prefix.clone());
+        if let Some(leaf) = signature.path.last() {
+            new_cluster.id = format!("{}__{}", new_cluster.id, leaf.tag);
+        }
         node.add_cluster(new_cluster);
         let idx = node.clusters.len() - 1;
         &mut node.clusters[idx]
@@ -173,6 +179,11 @@ impl ParseTree {
         let mut best_idx = None;
 
         for (idx, cluster) in node.clusters.iter().enumerate() {
+            // Keep different element types apart (e.g. <a> vs <button> that share
+            // the same top path prefix) so a LIST stays a homogeneous component.
+            if !same_leaf_tag(&cluster.signature_template, signature) {
+                continue;
+            }
             let score = Self::calculate_cluster_similarity(&cluster.signature_template, signature);
             if score > best_score && score >= SIMILARITY_THRESHOLD {
                 best_score = score;
@@ -233,6 +244,9 @@ impl ParseTree {
         let mut best_cluster = None;
 
         for cluster in &node.clusters {
+            if !same_leaf_tag(&cluster.signature_template, signature) {
+                continue;
+            }
             let score =
                 Self::calculate_cluster_similarity_readonly(&cluster.signature_template, signature);
             if score > best_score && score >= SIMILARITY_THRESHOLD {
@@ -261,6 +275,16 @@ impl ParseTree {
 impl Default for ParseTree {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Two signatures belong to the same component only if their leaf element has the
+/// same tag. This stops a shared top prefix from merging different controls.
+fn same_leaf_tag(a: &Signature, b: &Signature) -> bool {
+    match (a.path.last(), b.path.last()) {
+        (Some(ta), Some(tb)) => ta.tag == tb.tag,
+        (None, None) => true,
+        _ => false,
     }
 }
 
@@ -367,5 +391,43 @@ mod tests {
         let cluster = ClusterNode::new("div:main>button:action".to_string());
         assert!(cluster.elements.is_empty());
         assert!(!cluster.id.is_empty());
+    }
+
+    fn tok(tag: &str) -> signature::DOMToken {
+        signature::DOMToken {
+            tag: tag.to_string(),
+            role: None,
+            semantic_type: None,
+            structural_class: None,
+            depth: 0,
+        }
+    }
+
+    // issue #03: elements that share the top-5 path prefix but have a different
+    // leaf tag (e.g. <a> vs <button> deep under `main`) must NOT merge into one
+    // LIST. Same leaf tag must still group.
+    #[test]
+    fn different_leaf_tags_do_not_merge() {
+        let deep = |leaf: &str| {
+            let mut path = vec![tok("div"); 9];
+            path.push(tok(leaf));
+            Signature {
+                path,
+                prefix: "div:->div:->div:->div:->div:-".to_string(),
+                stable_attrs: HashMap::new(),
+                text_content: None,
+                position_in_parent: None,
+                children_hash: 0,
+                depth: 10,
+            }
+        };
+
+        let mut clusterer = DOMElementClusterer::new();
+        let id_link = clusterer.add_element("link".to_string(), deep("a"));
+        let id_btn = clusterer.add_element("button".to_string(), deep("button"));
+        let id_link2 = clusterer.add_element("link2".to_string(), deep("a"));
+
+        assert_ne!(id_link, id_btn, "different leaf tags must not share a cluster");
+        assert_eq!(id_link, id_link2, "same leaf tag must group together");
     }
 }
