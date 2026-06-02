@@ -4,7 +4,15 @@ on:
   push:
     tags:
       - 'v*'
+    branches:
+      - main
+    paths:
+      - 'crates/**'
+      - '.github/workflows/build-native-binaries.yml'
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build-linux:
@@ -26,6 +34,92 @@ jobs:
         with:
           name: frap-core-rpc-linux-x86_64
           path: crates/target/release/frap-core-rpc
+          retention-days: 30
+
+  build-linux-musl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates
+
+      - name: Build frap-core-rpc (musl)
+        run: cd crates && cargo build --release -p frap-core --bin frap-core-rpc --target x86_64-unknown-linux-musl
+
+      - name: Rename binary
+        run: mv crates/target/x86_64-unknown-linux-musl/release/frap-core-rpc crates/target/release/frap-core-rpc-linux-x86_64-musl
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: frap-core-rpc-linux-x86_64-musl
+          path: crates/target/release/frap-core-rpc-linux-x86_64-musl
+          retention-days: 30
+
+  build-linux-aarch64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Install aarch64 cross-linker
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates
+
+      - name: Build frap-core-rpc (aarch64)
+        run: cd crates && cargo build --release -p frap-core --bin frap-core-rpc --target aarch64-unknown-linux-gnu
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+      - name: Rename binary
+        run: mv crates/target/aarch64-unknown-linux-gnu/release/frap-core-rpc crates/target/release/frap-core-rpc-linux-aarch64
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: frap-core-rpc-linux-aarch64
+          path: crates/target/release/frap-core-rpc-linux-aarch64
+          retention-days: 30
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates
+
+      - name: Build frap-core-rpc (windows)
+        run: cd crates && cargo build --release -p frap-core --bin frap-core-rpc --target x86_64-pc-windows-msvc
+
+      - name: Rename binary
+        run: mv crates/target/x86_64-pc-windows-msvc/release/frap-core-rpc.exe crates/target/release/frap-core-rpc-win-x64.exe
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: frap-core-rpc-win-x64.exe
+          path: crates/target/release/frap-core-rpc-win-x64.exe
           retention-days: 30
 
   build-macos-x86_64:
@@ -77,3 +171,74 @@ jobs:
           name: frap-core-rpc-macos-aarch64
           path: crates/target/release/frap-core-rpc-macos-aarch64
           retention-days: 30
+
+  # Collect all 6 platform binaries, stage them into the frap-core-java resources,
+  # and PACKAGE the MCP jars with every platform bundled. The binaries themselves
+  # are intentionally git-ignored (see .gitignore) — they are never committed; they
+  # live only inside the published jar. The end-user path is then simply "connect
+  # the MCP server" (java -jar works out of the box on Linux / macOS / Windows,
+  # no native build required). The jars are uploaded as workflow artifacts and, on
+  # version tags, attached to the GitHub Release.
+  publish-binaries:
+    needs:
+      - build-linux
+      - build-linux-musl
+      - build-linux-aarch64
+      - build-windows
+      - build-macos-x86_64
+      - build-macos-aarch64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all platform binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Stage binaries into frap-core-java resources
+        run: |
+          set -euo pipefail
+          DEST="sdk/java/frap-core-java/src/main/resources/META-INF/native"
+          mkdir -p "$DEST"
+          # Each artifact directory is named after the canonical binary file name
+          # (e.g. frap-core-rpc-linux-x86_64) and contains exactly one binary.
+          for d in dist/frap-core-rpc-*/; do
+            name="$(basename "$d")"
+            file="$(find "$d" -type f | head -n 1)"
+            cp "$file" "$DEST/$name"
+            case "$name" in
+              *.exe) ;;            # Windows binary: no exec bit
+              *) chmod 0755 "$DEST/$name" ;;
+            esac
+          done
+          echo "Staged binaries (bundled into the jar, not committed):"
+          ls -la "$DEST"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Package MCP jars with all platform binaries bundled
+        run: >-
+          mvn -B -f sdk/java/frap-mcp/pom.xml
+          -pl frap-mcp-stdio,frap-mcp-http -am package -DskipTests
+
+      - name: Upload bundled MCP jars
+        uses: actions/upload-artifact@v4
+        with:
+          name: frap-mcp-jars
+          path: |
+            sdk/java/frap-mcp/frap-mcp-stdio/target/frap-mcp-stdio.jar
+            sdk/java/frap-mcp/frap-mcp-http/target/frap-mcp-http.jar
+          retention-days: 30
+
+      - name: Attach jars to the GitHub Release (tag builds only)
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            sdk/java/frap-mcp/frap-mcp-stdio/target/frap-mcp-stdio.jar
+            sdk/java/frap-mcp/frap-mcp-http/target/frap-mcp-http.jar

@@ -72,3 +72,8 @@ pkg/
 sdk/typescript/wasm/
 sdk/typescript/wasm-node/
 *.wasm
+
+# Claude Code / Serena
+.claude/
+.serena/
+logs/

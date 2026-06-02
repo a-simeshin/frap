@@ -1,0 +1,40 @@
+{
+  "html": "<html><body><form id=\"signup-form\"><input id=\"email-field\" name=\"email\" type=\"email\" placeholder=\"Email\"/><button data-testid=\"submit-button\" type=\"submit\">Submit</button></form><a href=\"/help\" class=\"help-link\">Need help?</a></body></html>",
+  "elements": [
+    {
+      "selector": "button[data-testid=\"submit-button\"]",
+      "tag": "button",
+      "attributes": {
+        "data-testid": "submit-button",
+        "type": "submit"
+      },
+      "text_content": "Submit",
+      "path": ["html", "body", "form#signup-form", "button"],
+      "position_in_parent": 1
+    },
+    {
+      "selector": "#email-field",
+      "tag": "input",
+      "attributes": {
+        "id": "email-field",
+        "name": "email",
+        "type": "email",
+        "placeholder": "Email"
+      },
+      "text_content": "",
+      "path": ["html", "body", "form#signup-form", "input"],
+      "position_in_parent": 0
+    },
+    {
+      "selector": "a.help-link",
+      "tag": "a",
+      "attributes": {
+        "href": "/help",
+        "class": "help-link"
+      },
+      "text_content": "Need help?",
+      "path": ["html", "body", "a"],
+      "position_in_parent": 1
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 package io.github.kotlerdev.frap.core.client;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import io.github.kotlerdev.frap.core.context.ContextTimeline;
@@ -74,23 +75,45 @@ public class FrapRpcClient implements FrapCoreClient {
 
     /**
      * Returns the bundled binary name for the current platform.
-     * For Linux x86_64, tries glibc first, then musl (for Alpine/Docker compatibility).
+     *
+     * <p>Branches key on the REAL {@code os.arch}/{@code os.name} tokens reported by the
+     * JVM (Linux x64 reports {@code amd64}, not {@code x86_64}; ARM reports {@code aarch64}),
+     * NOT on the artifact file-name strings.</p>
+     *
+     * <p>Covered platforms (artifact {@code META-INF/native/frap-core-rpc-<platform>}):
+     * linux-x86_64 (glibc), linux-x86_64-musl, linux-aarch64, macos-aarch64,
+     * macos-x86_64, win-x64 (.exe).</p>
+     *
+     * <p>For Linux x86_64, tries glibc first, then musl (for Alpine/Docker compatibility).</p>
      */
     private static String getBundledBinaryName() {
         String os = System.getProperty("os.name").toLowerCase();
         String arch = System.getProperty("os.arch").toLowerCase();
 
-        if (os.contains("linux") && arch.contains("amd64")) {
-            // Try glibc first (most common)
-            if (FrapRpcClient.class.getResource("/META-INF/native/frap-core-rpc-linux-x86_64") != null) {
+        // Windows (x64). os.arch is amd64 on the JVM, but win-x64 is the only Windows
+        // target we ship, so we key on os.name here.
+        if (os.contains("win")) {
+            return "frap-core-rpc-win-x64.exe";
+        }
+
+        if (os.contains("linux")) {
+            // Linux ARM64 (aarch64) — must be checked before the amd64 branch.
+            if (arch.contains("aarch64")) {
+                return "frap-core-rpc-linux-aarch64";
+            }
+            // Linux x86_64 (os.arch == amd64).
+            if (arch.contains("amd64")) {
+                // Try glibc first (most common)
+                if (FrapRpcClient.class.getResource("/META-INF/native/frap-core-rpc-linux-x86_64") != null) {
+                    return "frap-core-rpc-linux-x86_64";
+                }
+                // Fallback to musl (Alpine Linux, Docker)
+                if (FrapRpcClient.class.getResource("/META-INF/native/frap-core-rpc-linux-x86_64-musl") != null) {
+                    return "frap-core-rpc-linux-x86_64-musl";
+                }
+                // Default to glibc name if neither found (will fail with helpful message in extractBundledBinary)
                 return "frap-core-rpc-linux-x86_64";
             }
-            // Fallback to musl (Alpine Linux, Docker)
-            if (FrapRpcClient.class.getResource("/META-INF/native/frap-core-rpc-linux-x86_64-musl") != null) {
-                return "frap-core-rpc-linux-x86_64-musl";
-            }
-            // Default to glibc name if neither found (will fail with helpful message in extractBundledBinary)
-            return "frap-core-rpc-linux-x86_64";
         } else if (os.contains("mac")) {
             if (arch.contains("aarch64")) {
                 return "frap-core-rpc-macos-aarch64";
@@ -99,7 +122,8 @@ public class FrapRpcClient implements FrapCoreClient {
         }
         throw new UnsupportedOperationException(
             "Platform not supported: " + os + " " + arch +
-            ". Supported: Linux x86_64 (glibc/musl), macOS x86_64/aarch64"
+            ". Supported: Linux x86_64 (glibc/musl), Linux aarch64, macOS x86_64, "
+            + "macOS aarch64, Windows x64"
         );
     }
 
@@ -122,10 +146,13 @@ public class FrapRpcClient implements FrapCoreClient {
             Path tempDir = Files.createTempDirectory("frap-rpc-");
             tempDir.toFile().deleteOnExit();
 
-            Path binaryPath = tempDir.resolve("frap-core-rpc");
+            // Preserve the .exe suffix on Windows so the extracted file is executable.
+            String tempName = binaryName.endsWith(".exe") ? "frap-core-rpc.exe" : "frap-core-rpc";
+            Path binaryPath = tempDir.resolve(tempName);
             Files.copy(is, binaryPath, StandardCopyOption.REPLACE_EXISTING);
 
-            // Make executable (on Unix systems)
+            // Make executable. setExecutable is a no-op (returns false) on Windows where
+            // the exec-bit concept does not apply; the .exe suffix carries executability.
             binaryPath.toFile().setExecutable(true);
             binaryPath.toFile().deleteOnExit();
 
@@ -142,7 +169,10 @@ public class FrapRpcClient implements FrapCoreClient {
      */
     public FrapRpcClient(String binaryPath) throws IOException {
         this.objectMapper = new ObjectMapper()
-            .setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);
+            .setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
+            // Tolerate future unknown fields added by the Rust core so that adding a
+            // new serde field does not break deserialization of existing DTOs.
+            .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
 
         File binary = new File(binaryPath);
         if (!binary.exists()) {
