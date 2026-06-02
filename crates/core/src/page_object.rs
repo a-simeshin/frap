@@ -541,7 +541,7 @@ mod tests {
                 crate::DOMElementInfo {
                     selector: "x".into(),
                     tag: "button".into(),
-                    attributes: [("aria-label".to_string(), "Pay".to_string())].into(),
+                    attributes: [("data-testid".to_string(), "pay".to_string())].into(),
                     text_content: None,
                     path: vec!["div:-".into(), "button:-".into()],
                     position_in_parent: Some(0),
