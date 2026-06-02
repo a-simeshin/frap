@@ -57,143 +57,255 @@ public class FrapTools {
 
     private static final String BUILD_DESC =
         """
-        STEP 2 of 3. Call this AFTER frap_snapshot_script AND after you have \
-        executed that returned script inside the page. INLINE MODE: you pass the actual \
-        snapshot OBJECT here (this HTTP server has no shared filesystem, so everything \
-        travels as JSON). WHERE THE INPUT COMES FROM: 'domSnapshot' is the object that the \
-        frap_snapshot_script JavaScript RETURNED when you ran it in the page via \
-        Playwright/CDP — shape { html, elements:[...] }. Pass that exact object; do not \
-        modify it. WHAT THIS TOOL DOES: it scans the snapshot, finds interactive elements \
-        (buttons, links, inputs, etc.), groups repeating UI items (table rows, cards, \
-        menu links, tiles) into 'clusters', and gives every element a recommended locator \
-        plus a confidence score from 0 to 1 (higher = more stable). OUTPUT: the full \
-        ElementMap object = { elements:[...], clusters:[...], metadata:{...} }; each \
-        element carries a recommended_selector and a confidence. WHAT TO DO NEXT: pass the \
-        WHOLE returned ElementMap object, unchanged, as the 'elementMap' argument of STEP \
-        3 = frap_generate_page_object. OPTIONAL: before STEP 3 you may pass it to \
-        frap_filter_element_map to drop noise. Do not hand-edit the ElementMap. FULL \
-        ORDER: 1) frap_snapshot_script -> run JS in page -> 2) frap_build_element_map \
-        (this) -> (optional) frap_filter_element_map -> 3) frap_generate_page_object. \
-        EXAMPLE — call arguments: { "domSnapshot": { "html": "<html>...</html>", \
-        "elements": [ { "selector": "a[id='nav-link-main']", "tag": "a", \
-        "attributes": { "id": "nav-link-main", "href": "/app/main" }, \
-        "text_content": "Main", "path": ["div:-", "aside:-", "nav:-", \
-        "a:-"], "position_in_parent": 0 } ] }, "options": { "url": \
-        "https://example.com/app/main" } }. Result: the full ElementMap object \
-        { elements, clusters, metadata } — pass it straight into \
-        frap_generate_page_object.""";
+        NEW TO FRAP? If the frap workflow is not already in your context, call frap_help FIRST — it returns the full tool order and what to pass at each step.
+
+        frap_build_element_map — STEP 2 of 3 · INLINE MODE (object in, object out)
+
+        Builds a clustered ElementMap from a DOM snapshot object.
+
+        WHEN
+          After frap_snapshot_script and after you ran its JS in the page.
+
+        INPUT
+          • domSnapshot (object, required) — the object the snapshot JS returned, shape
+            { "html": ..., "elements": [...] }. Pass it exactly; do not modify it.
+          • options (object, optional) — { url, include_non_interactive, max_elements }
+
+        OUTPUT
+          The full ElementMap object: { elements, clusters, metadata }.
+          Each element carries a recommended_selector and a confidence (0..1).
+
+        NEXT
+          Pass the whole ElementMap, unchanged, as 'elementMap' to STEP 3 =
+          frap_generate_page_object (or first to frap_filter_element_map).
+
+        EXAMPLE
+          call:
+          {
+            "domSnapshot": {
+              "html": "<html>...</html>",
+              "elements": [
+                {
+                  "selector": "a[id='nav-link-main']",
+                  "tag": "a",
+                  "attributes": { "id": "nav-link-main", "href": "/app/main" },
+                  "text_content": "Main",
+                  "path": ["div:-", "aside:-", "nav:-", "a:-"],
+                  "position_in_parent": 0
+                }
+              ]
+            },
+            "options": { "url": "https://example.com/app/main" }
+          }
+          result:
+          the full ElementMap object { elements, clusters, metadata } — pass it straight
+          into frap_generate_page_object.
+
+        PIPELINE
+          1. frap_snapshot_script  → run JS in page
+          2. frap_build_element_map        (you are here)
+          3. frap_filter_element_map       (optional)
+          4. frap_generate_page_object""";
 
     private static final String BUILD_DOMSNAPSHOT_PARAM =
         """
-        REQUIRED. The DOM snapshot OBJECT returned by running the \
-        frap_snapshot_script JavaScript in your browser page. Shape: { html: <string>, \
-        elements: [ { selector, tag, attributes, text_content, path, \
-        position_in_parent }, ... ] }. Pass exactly what the script returned — do not \
-        wrap it, trim it, or edit it.""";
+        (object, required) The DOM snapshot returned by running the frap_snapshot_script \
+        JavaScript in your browser page. Shape: { html: <string>, elements: [ { selector, \
+        tag, attributes, text_content, path, position_in_parent }, ... ] }. Pass exactly \
+        what the script returned — do not wrap it, trim it, or edit it.""";
 
     private static final String BUILD_OPTIONS_PARAM =
         """
-        OPTIONAL. Map options { url, include_non_interactive, max_elements }. \
-        'url' only labels the result metadata (e.g. https://example.com/app); \
-        'include_non_interactive' = true also keeps non-clickable elements; \
-        'max_elements' caps how many elements are returned. Omit this whole argument \
-        to use defaults.""";
+        (object, optional) Map options { url, include_non_interactive, max_elements }:
+          • url — only labels the result metadata (e.g. https://example.com/app)
+          • include_non_interactive — true also keeps non-clickable elements
+          • max_elements — caps how many elements are returned
+        Omit this whole argument to use defaults.""";
 
     private static final String GENERATE_DESC =
         """
-        STEP 3 of 3 (final). Call this AFTER frap_build_element_map (or after the \
-        optional frap_filter_element_map). INLINE MODE: you pass the ElementMap OBJECT in, \
-        and you get source-code TEXT back. WHERE THE INPUT COMES FROM: 'elementMap' is the \
-        exact object that frap_build_element_map (or frap_filter_element_map) returned in \
-        STEP 2. You also choose 'language', 'className', and 'packageName'. OUTPUT: a \
-        GeneratedArtifact = { files: [ { path, content }, ... ] }. Each entry is one \
-        source file: 'path' is a suggested relative file path, 'content' is the FULL \
-        source code as text. WHAT TO DO: write each file's 'content' to its 'path' on disk \
-        yourself — this inline server returns the code but does not write files for you. \
-        After that you are done. FULL ORDER: 1) frap_snapshot_script -> 2) \
-        frap_build_element_map -> (optional) frap_filter_element_map -> 3) \
-        frap_generate_page_object (this). \
-        EXAMPLE — call arguments: { "elementMap": <the exact object returned by \
-        frap_build_element_map>, "language": "java_playwright", "className": \
-        "MainPage", "packageName": "com.example.pages" }. Result: { "files": \
-        [ { "path": "com/example/pages/MainPage.java", "content": "package \
-        com.example.pages; ..." } ] } — write each content to its path yourself.""";
+        NEW TO FRAP? If the frap workflow is not already in your context, call frap_help FIRST — it returns the full tool order and what to pass at each step.
+
+        frap_generate_page_object — STEP 3 of 3 · INLINE MODE (object in, source text out)
+
+        Generates Page Object source code from an ElementMap object.
+
+        WHEN
+          After frap_build_element_map (or after the optional frap_filter_element_map).
+
+        INPUT
+          • elementMap (object, required) — the exact object frap_build_element_map (or
+            frap_filter_element_map) returned in STEP 2. Pass it unchanged.
+          • language (string, required) — target output format / framework.
+          • className (string, required) — class name for the generated Page Object.
+          • packageName (string, required) — package / namespace for the generated class.
+
+        OUTPUT
+          A GeneratedArtifact: { files: [ { path, content }, ... ] }. Each entry is one
+          source file:
+          • path — a suggested relative file path
+          • content — the FULL source code as text
+
+        NEXT
+          Write each file's 'content' to its 'path' on disk yourself — this inline server
+          returns the code but does not write files for you. After that you are done.
+
+        EXAMPLE
+          call:
+          {
+            "elementMap": <the exact object returned by frap_build_element_map>,
+            "language": "java_playwright",
+            "className": "MainPage",
+            "packageName": "com.example.pages"
+          }
+          result:
+          {
+            "files": [
+              { "path": "com/example/pages/MainPage.java", "content": "package com.example.pages; ..." }
+            ]
+          }
+          Write each content to its path yourself.
+
+        PIPELINE
+          1. frap_snapshot_script  → run JS in page
+          2. frap_build_element_map
+          3. frap_filter_element_map       (optional)
+          4. frap_generate_page_object     (you are here)""";
 
     private static final String GENERATE_ELEMENTMAP_PARAM =
         """
-        REQUIRED. The exact ElementMap object returned by \
-        frap_build_element_map (or by frap_filter_element_map). Pass it through \
-        unchanged — do not edit it.""";
+        (object, required) The exact ElementMap object returned by frap_build_element_map \
+        (or by frap_filter_element_map). Pass it through unchanged — do not edit it.""";
 
     private static final String GENERATE_LANGUAGE_PARAM =
         """
-        REQUIRED. Target output format / framework. Currently supported: \
+        (string, required) Target output format / framework. Currently supported: \
         'java_playwright'. Example: java_playwright.""";
 
     private static final String GENERATE_CLASSNAME_PARAM =
         """
-        REQUIRED. The class name for the generated Page Object. Example: \
+        (string, required) The class name for the generated Page Object. Example: \
         PaymentsPage.""";
 
     private static final String GENERATE_PACKAGENAME_PARAM =
         """
-        REQUIRED. The package / namespace for the generated class. Example: \
+        (string, required) The package / namespace for the generated class. Example: \
         com.example.pages.""";
 
     private static final String FILTER_DESC =
         """
-        OPTIONAL helper that runs BETWEEN STEP 2 and STEP 3. WHERE THE INPUT \
-        COMES FROM: 'elementMap' is the object that frap_build_element_map returned; plus \
-        a 'filter' describing what to keep. OUTPUT: a smaller ElementMap object with the \
-        SAME shape ({ elements, clusters, metadata }), containing only the \
-        elements/clusters that match the filter. WHAT TO DO NEXT: pass the returned \
-        ElementMap object as the 'elementMap' argument of frap_generate_page_object. Skip \
-        this tool entirely if you want to keep every element. \
-        EXAMPLE — call arguments: { "elementMap": <object from frap_build_element_map>, \
-        "filter": { "interactive_only": true, "min_cluster_size": 2, "tags": \
-        ["a", "button"] } }. Result: a smaller ElementMap object with the same shape.""";
+        NEW TO FRAP? If the frap workflow is not already in your context, call frap_help FIRST — it returns the full tool order and what to pass at each step.
+
+        frap_filter_element_map — OPTIONAL · INLINE MODE (object in, smaller object out)
+
+        Shrinks an ElementMap by keeping only the elements/clusters that match a filter.
+        Runs BETWEEN STEP 2 and STEP 3.
+
+        WHEN
+          After frap_build_element_map, when you want to drop noise before STEP 3.
+
+        INPUT
+          • elementMap (object, required) — the object frap_build_element_map returned.
+          • filter (object, required) — describes what to keep:
+              { interactive_only, min_cluster_size, tags }
+
+        OUTPUT
+          A smaller ElementMap object with the SAME shape ({ elements, clusters, metadata }),
+          containing only the elements/clusters that match the filter.
+
+        NEXT
+          Pass the returned ElementMap object as 'elementMap' to frap_generate_page_object.
+          Skip this tool entirely if you want to keep every element.
+
+        EXAMPLE
+          call:
+          {
+            "elementMap": <object from frap_build_element_map>,
+            "filter": { "interactive_only": true, "min_cluster_size": 2, "tags": ["a", "button"] }
+          }
+          result:
+          a smaller ElementMap object with the same shape.
+
+        PIPELINE
+          1. frap_snapshot_script  → run JS in page
+          2. frap_build_element_map
+          3. frap_filter_element_map       (you are here, optional)
+          4. frap_generate_page_object""";
 
     private static final String FILTER_ELEMENTMAP_PARAM =
         """
-        REQUIRED. The exact ElementMap object returned by \
-        frap_build_element_map. Pass it through unchanged.""";
+        (object, required) The exact ElementMap object returned by frap_build_element_map. \
+        Pass it through unchanged.""";
 
     private static final String FILTER_FILTER_PARAM =
         """
-        REQUIRED. Filter spec { interactive_only, min_cluster_size, tags }. \
-        interactive_only=true keeps only clickable/typeable elements (buttons, links, \
-        inputs); min_cluster_size=N drops clusters with fewer than N members; \
-        tags=[...] keeps only those HTML tag names, e.g. ['a','button']. Set only the \
-        fields you need.""";
+        (object, required) Filter spec { interactive_only, min_cluster_size, tags }:
+          • interactive_only=true — keeps only clickable/typeable elements (buttons, links, inputs)
+          • min_cluster_size=N — drops clusters with fewer than N members
+          • tags=[...] — keeps only those HTML tag names, e.g. ['a','button']
+        Set only the fields you need.""";
 
     private static final String HEAL_DESC =
         """
-        STANDALONE repair tool — NOT part of the 3-step generation pipeline. Use \
-        it when a selector you ALREADY have has STOPPED matching because the page changed. \
-        WHERE THE INPUTS COME FROM (all inside 'request'): primary_selector = your \
-        old/broken selector string; original_signature = that element's structural \
-        fingerprint, copied from the element's 'signature' field in an ElementMap you \
-        built earlier with frap_build_element_map; dom_snapshot = a FRESH snapshot OBJECT \
-        obtained by running frap_snapshot_script in the page RIGHT NOW (same { html, \
-        elements } shape as STEP 1); min_confidence = a 0..1 threshold. OUTPUT: a \
-        HealResult = { healed, selector, confidence, top_candidates, ... }. If \
-        healed=true, 'selector' is the repaired locator and 'confidence' is how sure frap \
-        is. SAFETY: if frap is unsure (several equally likely matches, or everything is \
-        below min_confidence) it returns healed=false instead of guessing wrong — then \
-        re-snapshot or make the selector more specific. \
-        EXAMPLE — call arguments: { "request": { "primary_selector": \
-        "#nav-link-main", "original_signature": <the element's signature copied from a \
-        prior ElementMap>, "dom_snapshot": { "html": "<html>...</html>", \
-        "elements": [ ... ] }, "min_confidence": 0.85 } }. Result: { "healed": true, \
-        "selector": "#nav-link-main", "confidence": 0.91, "top_candidates": [] }.""";
+        NEW TO FRAP? If the frap workflow is not already in your context, call frap_help FIRST — it returns the full tool order and what to pass at each step.
+
+        frap_heal — STANDALONE · INLINE MODE (broken selector + fresh snapshot in, repaired selector out)
+
+        Repairs a single stale selector against a fresh snapshot. NOT part of the 3-step
+        generation pipeline.
+
+        WHEN
+          A selector you ALREADY have has STOPPED matching because the page changed.
+
+        INPUT
+          • request (object, required) — a HealRequest with these fields:
+              • primary_selector — your old/broken selector string.
+              • original_signature — that element's structural fingerprint, copied from
+                the element's 'signature' field in an ElementMap you built earlier with
+                frap_build_element_map.
+              • dom_snapshot — a FRESH snapshot OBJECT obtained by running
+                frap_snapshot_script in the page RIGHT NOW (same { html, elements } shape
+                as STEP 1).
+              • min_confidence — a 0..1 threshold.
+
+        OUTPUT
+          A HealResult: { healed, selector, confidence, top_candidates, ... }.
+          • If healed=true, 'selector' is the repaired locator and 'confidence' is how
+            sure frap is.
+
+        SAFETY
+          If frap is unsure (several equally likely matches, or everything is below
+          min_confidence) it returns healed=false instead of guessing wrong — then
+          re-snapshot or make the selector more specific.
+
+        EXAMPLE
+          call:
+          {
+            "request": {
+              "primary_selector": "#nav-link-main",
+              "original_signature": <the element's signature copied from a prior ElementMap>,
+              "dom_snapshot": {
+                "html": "<html>...</html>",
+                "elements": [ ... ]
+              },
+              "min_confidence": 0.85
+            }
+          }
+          result:
+          {
+            "healed": true,
+            "selector": "#nav-link-main",
+            "confidence": 0.91,
+            "top_candidates": []
+          }""";
 
     private static final String HEAL_REQUEST_PARAM =
         """
-        REQUIRED. A HealRequest object: { primary_selector: <old/broken \
-        selector string>, original_signature: <the element's Signature copied from a \
-        prior ElementMap element's 'signature' field>, dom_snapshot: <a FRESH { html, \
-        elements } snapshot object from running frap_snapshot_script now>, \
-        min_confidence: <0..1, optional> }.""";
+        (object, required) A HealRequest:
+          • primary_selector — old/broken selector string
+          • original_signature — the element's Signature copied from a prior ElementMap element's 'signature' field
+          • dom_snapshot — a FRESH { html, elements } snapshot object from running frap_snapshot_script now
+          • min_confidence — 0..1, optional""";
 
     private final FrapToolService service;
 
