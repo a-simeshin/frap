@@ -563,4 +563,205 @@ mod tests {
         assert!(src.contains("Locator pay()"), "{src}");
         assert!(src.contains("Locator pay2()"), "{src}");
     }
+
+    // ----- class skeleton & options -------------------------------------------
+
+    #[test]
+    fn skeleton_has_package_imports_class_and_constructor() {
+        let src = one("x", "button", &[("data-testid", "go")], None);
+        // default options: no package
+        assert!(src.contains("import com.microsoft.playwright.Locator;"));
+        assert!(src.contains("import com.microsoft.playwright.Page;"));
+        assert!(src.contains("public class GeneratedPage {"));
+        assert!(src.contains("private final Page page;"));
+        assert!(src.contains("public GeneratedPage(Page page) {"));
+        assert!(src.contains("this.page = page;"));
+    }
+
+    #[test]
+    fn package_declaration_emitted_only_when_set() {
+        let map = build_element_map(
+            &DOMSnapshot {
+                html: String::new(),
+                elements: vec![el("x", "button", &[("data-testid", "go")], &["button:-"])],
+            },
+            &MapOptions::default(),
+        );
+        let with_pkg = generate_page_object(
+            &map,
+            &GenerateOptions {
+                package_name: Some("ru.sber.pages".to_string()),
+                ..Default::default()
+            },
+        );
+        assert!(with_pkg.files[0].content.contains("package ru.sber.pages;"));
+        assert_eq!(with_pkg.files[0].path, "ru/sber/pages/GeneratedPage.java");
+
+        let without = generate_page_object(&map, &GenerateOptions::default());
+        assert!(!without.files[0].content.contains("package "));
+        assert_eq!(without.files[0].path, "GeneratedPage.java");
+    }
+
+    #[test]
+    fn unsupported_language_is_reported_not_panicked() {
+        let map = build_element_map(
+            &DOMSnapshot { html: String::new(), elements: vec![] },
+            &MapOptions::default(),
+        );
+        let art = generate_page_object(
+            &map,
+            &GenerateOptions { language: "python".to_string(), ..Default::default() },
+        );
+        assert_eq!(art.files[0].content, "// Unsupported language: python\n");
+    }
+
+    #[test]
+    fn include_signatures_toggles_prefix_comment() {
+        let map = build_element_map(
+            &DOMSnapshot {
+                html: String::new(),
+                elements: vec![el("x", "button", &[("data-testid", "go")], &["div:-", "button:-"])],
+            },
+            &MapOptions::default(),
+        );
+        let on = generate_page_object(
+            &map,
+            &GenerateOptions { include_signatures: true, ..Default::default() },
+        );
+        assert!(on.files[0].content.contains("// signature prefix:"));
+        let off = generate_page_object(
+            &map,
+            &GenerateOptions { include_signatures: false, ..Default::default() },
+        );
+        assert!(!off.files[0].content.contains("// signature prefix:"));
+    }
+
+    #[test]
+    fn empty_map_produces_a_valid_empty_class() {
+        let map = build_element_map(
+            &DOMSnapshot { html: String::new(), elements: vec![] },
+            &MapOptions::default(),
+        );
+        let src = gen(&map);
+        assert!(src.contains("public class GeneratedPage {"));
+        assert!(!src.contains("public Locator"));
+        // braces balanced
+        assert_eq!(
+            src.matches('{').count(),
+            src.matches('}').count(),
+            "unbalanced braces:\n{src}"
+        );
+    }
+
+    #[test]
+    fn confidence_comment_is_emitted_per_method() {
+        let src = one("x", "button", &[("data-testid", "go")], None);
+        assert!(src.contains("(confidence "), "{src}");
+    }
+
+    // ----- JSON wrapper -------------------------------------------------------
+
+    #[test]
+    fn generate_page_object_json_roundtrips() {
+        let map = build_element_map(
+            &DOMSnapshot {
+                html: String::new(),
+                elements: vec![el("x", "button", &[("data-testid", "go")], &["button:-"])],
+            },
+            &MapOptions::default(),
+        );
+        let map_json = serde_json::to_string(&map).unwrap();
+        let out = generate_page_object_json(&map_json, "").unwrap();
+        assert!(out.contains("\"files\""));
+        assert!(out.contains("GeneratedPage"));
+    }
+
+    #[test]
+    fn generate_page_object_json_rejects_bad_input() {
+        assert!(generate_page_object_json("not json", "").is_err());
+    }
+
+    // ----- clusters vs singletons ---------------------------------------------
+
+    #[test]
+    fn single_element_is_not_a_cluster_accessor() {
+        let src = one("x", "button", &[("data-testid", "only")], None);
+        assert!(!src.contains(".nth(index)"), "single element must not get items():\n{src}");
+    }
+
+    #[test]
+    fn list_cluster_emits_one_indexed_accessor() {
+        let snapshot = DOMSnapshot {
+            html: String::new(),
+            elements: vec![
+                el("a[id=\"n1\"]", "a", &[("id", "n1")], &["div:-", "nav:-", "a:-"]),
+                el("a[id=\"n2\"]", "a", &[("id", "n2")], &["div:-", "nav:-", "a:-"]),
+            ],
+        };
+        let src = gen(&build_element_map(&snapshot, &MapOptions::default()));
+        assert_eq!(src.matches(".nth(index)").count(), 1, "{src}");
+    }
+
+    #[test]
+    fn cluster_and_element_method_names_do_not_collide() {
+        // a cluster (clusterDivNavA...) plus singletons; all names must be unique.
+        let snapshot = DOMSnapshot {
+            html: String::new(),
+            elements: vec![
+                el("a[id=\"n1\"]", "a", &[("id", "n1")], &["div:-", "nav:-", "a:-"]),
+                el("a[id=\"n2\"]", "a", &[("id", "n2")], &["div:-", "nav:-", "a:-"]),
+                el("x", "button", &[("data-testid", "pay")], &["main:-", "button:-"]),
+            ],
+        };
+        let src = gen(&build_element_map(&snapshot, &MapOptions::default()));
+        let names: Vec<&str> = src
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("public Locator "))
+            .map(|l| l.split('(').next().unwrap_or(""))
+            .collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(names.len(), sorted.len(), "duplicate method names: {names:?}");
+    }
+
+    // ----- string / name helpers ----------------------------------------------
+
+    #[test]
+    fn escape_java_string_escapes_quotes_and_backslashes() {
+        assert_eq!(escape_java_string("a\"b"), "a\\\"b");
+        assert_eq!(escape_java_string("a\\b"), "a\\\\b");
+        assert_eq!(escape_java_string("plain"), "plain");
+    }
+
+    #[test]
+    fn to_camel_case_handles_separators_and_empty() {
+        assert_eq!(to_camel_case("nav-link-pay"), "navLinkPay");
+        assert_eq!(to_camel_case("a_b_c"), "aBC");
+        assert_eq!(to_camel_case("---"), "element");
+    }
+
+    #[test]
+    fn id_is_namelike_accepts_labels_rejects_generated() {
+        assert!(id_is_namelike("nav-link-pay"));
+        assert!(id_is_namelike("submit"));
+        assert!(!id_is_namelike("x")); // too few letters
+        assert!(!id_is_namelike("a1b2c3d4e5")); // number-dominant
+        assert!(!id_is_namelike("comp-uuid-x")); // uuid
+    }
+
+    #[test]
+    fn method_name_falls_back_to_tag_and_id_without_signal() {
+        // no testid/aria/name/namelike-id/text -> synthetic but readable
+        let src = one("x", "input", &[], None);
+        assert!(src.contains("Locator inputEl0()"), "{src}");
+    }
+
+    #[test]
+    fn cluster_method_name_is_camel_cased() {
+        assert_eq!(
+            cluster_method_name("div:->nav:->a:-"),
+            "clusterDivNavA"
+        );
+    }
 }
