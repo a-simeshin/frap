@@ -370,6 +370,8 @@ mod tests {
     }
 
     // issue #05: names must stay unique after disambiguation.
+    // The two elements collide on the NAME source ("pay") but have DIFFERENT
+    // selectors, so selector-dedup does not fold them and naming is exercised.
     #[test]
     fn colliding_names_get_numeric_suffix() {
         let snapshot = DOMSnapshot {
@@ -378,7 +380,7 @@ mod tests {
                 crate::DOMElementInfo {
                     selector: "x".into(),
                     tag: "button".into(),
-                    attributes: [("aria-label".to_string(), "Pay".to_string())].into(),
+                    attributes: [("data-testid".to_string(), "pay".to_string())].into(),
                     text_content: None,
                     path: vec!["div:-".into(), "button:-".into()],
                     position_in_parent: Some(0),
