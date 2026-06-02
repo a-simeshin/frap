@@ -100,6 +100,7 @@ fn generate_java_playwright(map: &ElementMap, options: &GenerateOptions) -> Stri
     writeln!(out, "    }}").unwrap();
 
     let mut emitted_clusters = std::collections::HashSet::new();
+    let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Members emitted via a cluster `items(index)` accessor are not emitted again
     // as individual methods.
     let mut clustered_member_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -114,7 +115,7 @@ fn generate_java_playwright(map: &ElementMap, options: &GenerateOptions) -> Stri
         for id in &cluster.element_ids {
             clustered_member_ids.insert(id.as_str());
         }
-        let method = cluster_method_name(&cluster.prefix_signature);
+        let method = unique_name(cluster_method_name(&cluster.prefix_signature), &mut used_names);
         let list_selector = cluster_list_selector(cluster, map);
         writeln!(
             out,
@@ -142,7 +143,7 @@ fn generate_java_playwright(map: &ElementMap, options: &GenerateOptions) -> Stri
         if !emitted_selectors.insert(element.recommended_selector.as_str()) {
             continue;
         }
-        let method = element_method_name(element);
+        let method = unique_name(element_method_name(element), &mut used_names);
         writeln!(
             out,
             "\n    /** {} (confidence {:.2}) */",
@@ -167,14 +168,87 @@ fn generate_java_playwright(map: &ElementMap, options: &GenerateOptions) -> Stri
 }
 
 fn element_method_name(element: &ElementNode) -> String {
-    let base = element
-        .tag
-        .chars()
-        .chain(element.locator.strategy.chars())
-        .filter(|c| c.is_alphanumeric())
-        .collect::<String>();
-    let suffix = element.id.replace('-', "");
-    to_camel_case(&format!("{base}_{suffix}"))
+    let name = to_camel_case(&transliterate(&method_name_source(element)));
+    if name.is_empty() {
+        to_camel_case(&format!("{}_element", element.tag))
+    } else {
+        name
+    }
+}
+
+/// Picks the human source for a method name from the element semantics, in
+/// priority order: `data-testid` → `aria-label` → semantic `id` → `name` →
+/// visible text → synthetic fallback.
+fn method_name_source(element: &ElementNode) -> String {
+    let attrs = &element.signature.stable_attrs;
+    for key in ["data-testid", "aria-label", "name"] {
+        if let Some(v) = attrs.get(key) {
+            if !v.trim().is_empty() {
+                return v.clone();
+            }
+        }
+    }
+    if let Some(id) = attrs.get("id") {
+        if id_is_namelike(id) {
+            return id.clone();
+        }
+    }
+    if let Some(text) = &element.signature.text_content {
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !text.is_empty() && text.chars().count() <= 40 {
+            return text;
+        }
+    }
+    format!("{}_{}", element.tag, element.id)
+}
+
+/// An id is good as a method name if it reads like a label: it has letters and
+/// is not number-dominant or uuid-like. (Stricter `looks_like_generated` is for
+/// rejecting *selectors*, and over-rejects semantic ids like `nav-link-pay`.)
+fn id_is_namelike(id: &str) -> bool {
+    let id = id.trim();
+    let letters = id.chars().filter(|c| c.is_alphabetic()).count();
+    let digits = id.chars().filter(|c| c.is_ascii_digit()).count();
+    letters >= 2 && digits * 2 < id.chars().count() && !id.contains("uuid")
+}
+
+/// Transliterates Cyrillic to Latin so names stay valid Java identifiers.
+/// Non-Cyrillic characters are kept as-is (word boundaries handled downstream).
+fn transliterate(input: &str) -> String {
+    let mut out = String::new();
+    for ch in input.chars() {
+        let lower = ch.to_lowercase().next().unwrap_or(ch);
+        let mapped = match lower {
+            'а' => "a", 'б' => "b", 'в' => "v", 'г' => "g", 'д' => "d",
+            'е' | 'ё' | 'э' => "e", 'ж' => "zh", 'з' => "z", 'и' => "i",
+            'й' => "y", 'к' => "k", 'л' => "l", 'м' => "m", 'н' => "n",
+            'о' => "o", 'п' => "p", 'р' => "r", 'с' => "s", 'т' => "t",
+            'у' => "u", 'ф' => "f", 'х' => "h", 'ц' => "ts", 'ч' => "ch",
+            'ш' => "sh", 'щ' => "sch", 'ы' => "y", 'ю' => "yu", 'я' => "ya",
+            'ъ' | 'ь' => "",
+            _ => {
+                out.push(ch);
+                continue;
+            }
+        };
+        out.push_str(mapped);
+    }
+    out
+}
+
+/// Ensures a method name is unique within the class by adding a numeric suffix.
+fn unique_name(base: String, used: &mut std::collections::HashSet<String>) -> String {
+    if used.insert(base.clone()) {
+        return base;
+    }
+    let mut n = 2;
+    loop {
+        let candidate = format!("{base}{n}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
 fn cluster_method_name(prefix: &str) -> String {
@@ -307,6 +381,27 @@ mod tests {
             .clone()
     }
 
+    fn one(selector: &str, tag: &str, attrs: &[(&str, &str)], text: Option<&str>) -> String {
+        let snapshot = DOMSnapshot {
+            html: String::new(),
+            elements: vec![crate::DOMElementInfo {
+                selector: selector.to_string(),
+                tag: tag.to_string(),
+                attributes: attrs
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+                text_content: text.map(|t| t.to_string()),
+                path: vec![format!("{tag}:-")],
+                position_in_parent: None,
+            }],
+        };
+        let map = build_element_map(&snapshot, &MapOptions::default());
+        generate_page_object(&map, &GenerateOptions::default()).files[0]
+            .content
+            .clone()
+    }
+
     #[test]
     fn prefix_to_css_builds_descendant_selector() {
         assert_eq!(prefix_to_css("div:->div:->aside:->nav:->a:-"), "div div aside nav a");
@@ -399,5 +494,73 @@ mod tests {
             !src.contains("page.locator(\"#nav-1\");"),
             "cluster member should not get its own method:\n{src}"
         );
+    }
+
+    #[test]
+    fn transliterate_cyrillic_to_latin() {
+        assert_eq!(transliterate("Между своими"), "mezhdu svoimi");
+        assert_eq!(transliterate("Оплатить"), "oplatit");
+        assert_eq!(transliterate("nav-link"), "nav-link");
+    }
+
+    // issue #05: names come from semantics, not tag+strategy+el-N.
+    #[test]
+    fn method_name_from_testid() {
+        assert!(one("x", "button", &[("data-testid", "remove-btn")], None).contains("Locator removeBtn()"));
+    }
+
+    #[test]
+    fn method_name_from_id_when_no_testid() {
+        assert!(one("x", "a", &[("id", "nav-link-payments")], None).contains("Locator navLinkPayments()"));
+    }
+
+    #[test]
+    fn method_name_from_aria_label() {
+        assert!(one("x", "button", &[("aria-label", "Log out")], None).contains("Locator logOut()"));
+    }
+
+    #[test]
+    fn method_name_from_cyrillic_text() {
+        let src = one("x", "a", &[], Some("Между своими"));
+        assert!(src.contains("Locator mezhduSvoimi()"), "{src}");
+    }
+
+    #[test]
+    fn method_name_has_no_strategy_or_synthetic_id() {
+        let src = one("x", "button", &[("data-testid", "remove-btn")], None);
+        assert!(!src.contains("buttondatatestid"));
+        assert!(!src.contains("El0"));
+    }
+
+    // issue #05: names must stay unique after disambiguation.
+    #[test]
+    fn colliding_names_get_numeric_suffix() {
+        let snapshot = DOMSnapshot {
+            html: String::new(),
+            elements: vec![
+                crate::DOMElementInfo {
+                    selector: "x".into(),
+                    tag: "button".into(),
+                    attributes: [("aria-label".to_string(), "Pay".to_string())].into(),
+                    text_content: None,
+                    path: vec!["div:-".into(), "button:-".into()],
+                    position_in_parent: Some(0),
+                },
+                crate::DOMElementInfo {
+                    selector: "y".into(),
+                    tag: "button".into(),
+                    attributes: [("aria-label".to_string(), "Pay".to_string())].into(),
+                    text_content: None,
+                    path: vec!["section:-".into(), "button:-".into()],
+                    position_in_parent: Some(0),
+                },
+            ],
+        };
+        let map = build_element_map(&snapshot, &MapOptions::default());
+        let src = generate_page_object(&map, &GenerateOptions::default()).files[0]
+            .content
+            .clone();
+        assert!(src.contains("Locator pay()"), "{src}");
+        assert!(src.contains("Locator pay2()"), "{src}");
     }
 }
