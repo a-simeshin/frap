@@ -119,6 +119,32 @@ public class ArtifactStore {
     }
 
     /**
+     * Writes a raw JSON string verbatim under the work directory using a unique name
+     * {@code <kind>-<UUID>.json}.
+     *
+     * <p>Unlike {@link #writeJson(String, Object)} this performs no serialization: the
+     * supplied string is written byte-for-byte (UTF-8). Used for ingesting externally
+     * produced JSON (e.g. a browser-posted DOM snapshot) without round-tripping it
+     * through a DTO.</p>
+     *
+     * @param kind artifact kind, used as the filename prefix
+     * @param json raw JSON content to write verbatim
+     * @return the absolute path of the written file
+     */
+    public String writeRawJson(final String kind, final String json) {
+        Assert.hasText(kind, "kind cannot be blank");
+        Assert.notNull(json, "json cannot be null");
+
+        final Path target = ensureWorkDir().resolve(kind + "-" + UUID.randomUUID() + ".json");
+        try {
+            Files.writeString(target, json, StandardCharsets.UTF_8);
+            return target.toAbsolutePath().toString();
+        } catch (final IOException e) {
+            throw new UncheckedIOException("frap failed to write artifact " + target + ": " + e.getMessage(), e);
+        }
+    }
+
+    /**
      * Writes text content under the work directory, preserving the given relative path
      * (used for generated source files whose package layout matters).
      *

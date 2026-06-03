@@ -2,17 +2,18 @@
 
 Spring Boot / Spring AI implementation of the frap MCP server. It wraps the
 native `frap-core-rpc` binary and exposes frap's self-healing selector engine as
-**6 MCP tools** over two transports:
+**6 MCP tools** over three runners:
 
 | Module | Transport | I/O mode |
 |--------|-----------|----------|
 | `frap-mcp-stdio` | stdio (local) | **file** |
 | `frap-mcp-http`  | streamable-http | **inline** |
+| `frap-mcp-http-local` | streamable-http (local) | **file** |
 | `frap-mcp-tools` | shared `@McpTool` beans + core client | — |
 
 All 6 tools (`frap_help`, `frap_snapshot_script`, `frap_build_element_map`,
 `frap_filter_element_map`, `frap_generate_page_object`, `frap_heal`) are present
-on **both** transports; only the way large artefacts are passed differs.
+on **all** runners; only the way large artefacts are passed differs.
 `frap_help` returns a mode-aware beginner guide; `frap_snapshot_script` returns
 the browser-side capture JS — both are always-on (not gated by `frap.io.mode`).
 
@@ -24,6 +25,7 @@ the tool beans via `@ConditionalOnProperty`:
 | `frap.io.mode` | Runner | Beans active | Artefact passing |
 |----------------|--------|--------------|------------------|
 | `file`   | stdio | `FrapFileTools` + `FrapSnapshotTool` + `FrapHelpTool` | by **absolute path + digest** |
+| `file`   | http-local | `FrapFileTools` + `FrapSnapshotTool` + `FrapHelpTool` | by **absolute path + digest** (over HTTP; needs a shared FS) |
 | `inline` | http  | `FrapTools` + `FrapSnapshotTool` + `FrapHelpTool`     | **inline** JSON (content in the request/response) |
 
 `FrapSnapshotTool` (`frap_snapshot_script`) and `FrapHelpTool` (`frap_help`) are
@@ -39,7 +41,15 @@ property is absent.
 On stdio the server and the agent share one filesystem, so streaming large blobs
 (a single page's ElementMap can be tens of KB) through the agent context wastes
 tokens and latency. File-mode passes **paths**, not content. HTTP clients may be
-remote with no shared FS, so HTTP stays **inline** — behaviour is unchanged.
+remote with no shared FS, so the default HTTP runner (`frap-mcp-http`) stays
+**inline** — behaviour is unchanged.
+
+When the HTTP client *does* share a filesystem with the server (a local agent on
+the same host), use `frap-mcp-http-local` — same streamable-http transport, but
+file-mode semantics: artefacts move by **absolute path + digest** instead of
+inline JSON. This avoids inline clients that truncate long strings (and force the
+agent to reconstruct a corrupted ElementMap) while keeping HTTP for environments
+where stdio is unavailable.
 
 ## file-mode (stdio): paths + digest
 
@@ -175,6 +185,72 @@ JSON:
 - This runner is **inline mode**: tools take/return objects (content in the JSON). Behaviour is unchanged from before.
 - Override the port with `--server.port=NNNN` if 8080 is taken.
 
+### C) streamable-http runner, file mode (`frap-mcp-http-local`)
+
+Same transport as (B) but **file mode** — for a local agent that shares the
+filesystem with the server. Tools take/return **absolute paths + digest** instead
+of inline JSON, so a client that truncates long strings can't corrupt the
+ElementMap. The default port is **8765** (so it can coexist with the inline
+`frap-mcp-http` on 8080). Build it first:
+`mvn -f sdk/java/frap-mcp/pom.xml -pl frap-mcp-http-local -am package -DskipTests`.
+
+Start the server manually, then register its URL:
+
+```bash
+java -jar /ABS/PATH/sdk/java/frap-mcp/frap-mcp-http-local/target/frap-mcp-http-local.jar   # serves http://localhost:8765/mcp
+claude mcp add frap-local --transport http http://localhost:8765/mcp
+```
+
+JSON:
+
+```json
+{
+  "mcpServers": {
+    "frap-local": { "type": "http", "url": "http://localhost:8765/mcp" }
+  }
+}
+```
+
+- This runner is **file mode**: tools take/return absolute paths + digest (same
+  signatures as the stdio runner).
+- **Requires a shared filesystem** between client and server. The agent must be
+  able to read/write the paths the server returns — run both on the same host and
+  point them at the same `frap.io.work-dir` (default `${java.io.tmpdir}/frap` on
+  both, so nothing extra is needed when they share one temp dir).
+- Override the port with `--server.port=NNNN` if 8765 is taken; override the
+  shared working directory with `--frap.io.work-dir=/abs/path` (Spring Boot
+  accepts `--prop=value`):
+
+  ```bash
+  java -jar /ABS/PATH/.../frap-mcp-http-local.jar \
+    --server.port=8765 --frap.io.work-dir=/abs/shared/frap
+  ```
+
+#### Snapshot flow in `frap-mcp-http-local`
+
+So that no large content reaches the agent context even on the snapshot step,
+`frap_snapshot_script` is **mode-aware**:
+
+- In **file mode** it returns a **Node-context** capture script (for a browser
+  `run_code` tool that exposes Node `fs`). The script collects
+  `{ html, elements }`, **writes it itself** to
+  `<work-dir>/snapshot-<ts>-<rand>.json` (the server injects the resolved
+  `frap.io.work-dir` into the script text), and returns only
+  `{ "snapshot_path": "<absolute path>" }`. Pass that path straight to
+  `frap_build_element_map(domSnapshotPath=...)` — the snapshot never enters the
+  agent context.
+- **Fallback** for clients without a Node-context `run_code` (e.g. a page-context
+  `evaluate` only): run the JS, take the returned `{ html, elements }` object, and
+  **save it to a JSON file yourself**, then pass that file's absolute path to
+  `frap_build_element_map`. `frap_help` documents this fallback.
+
+```
+1. frap_snapshot_script               -> Node capture JS (string)
+2. (agent) browser run_code(JS)        -> writes snapshot.json, returns { snapshot_path }
+3. frap_build_element_map(snapshot_path) -> { elementMapPath, summary }
+4. frap_generate_page_object(elementMapPath, ...) -> { filePaths, fileCount, workDir }
+```
+
 ## Build & test
 
 ```bash
@@ -187,6 +263,9 @@ mvn -f sdk/java/frap-mcp/pom.xml -pl frap-mcp-tools test
 # Integration layer (stdio, real native binary)
 mvn -f sdk/java/frap-mcp/pom.xml -pl frap-mcp-stdio verify
 
-# Full build of both runners
+# Integration layer (http-local, real jar over HTTP JSON-RPC)
+mvn -f sdk/java/frap-mcp/pom.xml -pl frap-mcp-http-local verify
+
+# Full build of all runners
 mvn -f sdk/java/frap-mcp/pom.xml verify
 ```

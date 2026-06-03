@@ -1,6 +1,7 @@
 package io.github.kotlerdev.frap.mcp.tools;
 
 import org.springaicommunity.mcp.annotation.McpTool;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 /**
@@ -62,15 +63,21 @@ public class FrapSnapshotTool {
              position_in_parent }, ... ] }. THAT returned object is the DOM snapshot.
 
         NEXT
-          This snapshot object is the input to STEP 2 = frap_build_element_map. Which form
-          you pass depends on the transport:
-            • INLINE MODE (HTTP server) — pass the snapshot object DIRECTLY as the
+          This snapshot is the input to STEP 2 = frap_build_element_map. Which form you pass
+          depends on the transport:
+            • INLINE MODE (HTTP server) — the returned script is a page-context IIFE. Run it
+              with page.evaluate and pass the resulting snapshot object DIRECTLY as the
               'domSnapshot' argument of frap_build_element_map.
-            • FILE MODE (local stdio server) — write the snapshot object to a file on disk
-              as RAW JSON (the object exactly as returned, valid UTF-8 JSON, do NOT wrap it
-              in any envelope such as {result:...} or {data:...}), then pass that file's
-              ABSOLUTE path (for example /tmp/frap/snapshot-main.json) as the
-              'domSnapshotPath' argument of frap_build_element_map.
+            • FILE MODE (local stdio server) — the returned script ALSO runs in PAGE CONTEXT
+              (no filesystem access). When a local frap ingest endpoint is configured it is an
+              async function that POSTs the snapshot to frap and returns ONLY
+              { snapshot_path: "<abs path>" } — hand that path straight to
+              frap_build_element_map as 'domSnapshotPath'; the big snapshot never enters your
+              context. If the POST is blocked (CSP connect-src) the script instead returns the
+              raw { html, elements } object as a fallback — save THAT to a file yourself as RAW
+              JSON (no wrapper) and pass its absolute path as 'domSnapshotPath'. If no ingest
+              endpoint is configured the script is just the plain IIFE returning
+              { html, elements } — save it to a file yourself and pass that path.
           How to tell which mode you are in: look at frap_build_element_map's parameters —
           if it wants 'domSnapshot' (an object) you are in inline mode; if it wants
           'domSnapshotPath' (a string path) you are in file mode.
@@ -105,8 +112,23 @@ public class FrapSnapshotTool {
     /** Loader for the cached browser-side DOM snapshot script. */
     private final SnapshotScript snapshotScript;
 
-    public FrapSnapshotTool(final SnapshotScript snapshotScript) {
+    /** Active I/O mode of this server ({@code inline} or {@code file}). */
+    private final String ioMode;
+
+    /**
+     * Absolute URL of the local frap ingest endpoint the page-context script POSTs the
+     * snapshot to in file mode. Empty when no HTTP listener is available (e.g. pure stdio).
+     */
+    private final String ingestUrl;
+
+    public FrapSnapshotTool(
+        final SnapshotScript snapshotScript,
+        @Value("${frap.io.mode:inline}") final String ioMode,
+        @Value("${frap.io.ingest-url:}") final String ingestUrl
+    ) {
         this.snapshotScript = snapshotScript;
+        this.ioMode = ioMode;
+        this.ingestUrl = ingestUrl;
     }
 
     @McpTool(
@@ -114,6 +136,86 @@ public class FrapSnapshotTool {
         description = SNAPSHOT_DESC
     )
     public String frapSnapshotScript() {
+        if ("file".equalsIgnoreCase(ioMode)) {
+            return fileModeScript();
+        }
+        // INLINE mode: hand back the original page-context IIFE unchanged.
         return snapshotScript.snapshotJs();
+    }
+
+    /**
+     * Builds the file-mode snapshot script.
+     *
+     * <p>Both branches return a PAGE-CONTEXT script (no Node, no {@code require}, no {@code fs}),
+     * so it runs identically under every client's page evaluator (playwright-mcp
+     * {@code browser_evaluate}/{@code browser_run_code}, chrome-devtools-mcp
+     * {@code evaluate_script}, playwright-cli {@code page.evaluate}).</p>
+     *
+     * <ul>
+     *   <li><b>No ingest URL</b> (e.g. pure stdio with no HTTP listener): fall back to the plain
+     *       page-context IIFE — the same script inline mode returns. The agent gets the raw
+     *       {@code {html, elements:[...]}} object and saves it to a file itself.</li>
+     *   <li><b>Ingest URL present</b>: an async page-context function runs the shared COLLECTOR
+     *       (returning {@code {html, elements:[...]}} VERBATIM), POSTs it to the local frap ingest
+     *       endpoint, and returns the server's {@code { snapshot_path }} so the big snapshot never
+     *       enters the agent's context. On any fetch/CSP failure it returns the raw snapshot as a
+     *       fallback for the agent to persist.</li>
+     * </ul>
+     *
+     * @return the page-context snapshot script source
+     */
+    private String fileModeScript() {
+        if (ingestUrl == null || ingestUrl.isBlank()) {
+            // No HTTP listener to POST to: hand back the plain page-context IIFE.
+            return snapshotScript.snapshotJs();
+        }
+        final String collector = collector();
+        final String url = jsStringLiteral(ingestUrl);
+        return """
+            async () => {
+              const snapshot = (%s)();
+              try {
+                const res = await fetch(%s, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify(snapshot)
+                });
+                if (res.ok) return await res.json();
+              } catch (e) {}
+              return snapshot;
+            }""".formatted(collector, url);
+    }
+
+    /**
+     * Returns the shared element collector as a NON-invoked function expression.
+     *
+     * <p>The cached snapshot script is a self-executing IIFE ({@code (() => {...})()}) whose
+     * return value is {@code {html, elements:[...]}}. For {@code page.evaluate(<collector>)}
+     * we need the function itself, so the trailing invocation {@code ()} is stripped, leaving
+     * {@code (() => {...})}. Inline mode keeps the original IIFE untouched.</p>
+     *
+     * @return the collector function expression returning {@code {html, elements:[...]}}
+     */
+    private String collector() {
+        final String iife = snapshotScript.snapshotJs().strip();
+        if (iife.endsWith("()")) {
+            return iife.substring(0, iife.length() - 2).strip();
+        }
+        return iife;
+    }
+
+    /**
+     * Renders a value as a double-quoted JavaScript string literal.
+     *
+     * <p>Backslashes are normalised to forward slashes and double quotes are escaped, so the
+     * value is safe to embed inside a double-quoted JS string (e.g. the ingest URL injected
+     * into the file-mode fetch script).</p>
+     *
+     * @param value the raw value (e.g. an absolute ingest URL)
+     * @return a valid double-quoted JS string literal
+     */
+    private static String jsStringLiteral(final String value) {
+        final String normalised = value.replace('\\', '/').replace("\"", "\\\"");
+        return "\"" + normalised + "\"";
     }
 }

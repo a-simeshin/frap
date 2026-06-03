@@ -77,3 +77,6 @@ sdk/typescript/wasm-node/
 .claude/
 .serena/
 logs/
+
+# Throwaway locator-quality analysis artifacts (see specs/locator-quality-findings.md)
+.frap-analysis/

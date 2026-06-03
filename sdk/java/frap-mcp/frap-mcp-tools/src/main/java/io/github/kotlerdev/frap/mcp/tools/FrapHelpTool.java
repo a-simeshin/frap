@@ -51,10 +51,35 @@ public class FrapHelpTool {
                  chrome-devtools MCP server, or a direct CDP debugging-port connection.
                • Open the page you care about in that browser tool, then execute the
                  JavaScript inside the page (for example Playwright: page.evaluate(theScript)).
-               • The script returns an object shaped { html, elements: [...] }. That object
-                 is the photo (the DOM snapshot).
-               • INLINE mode: keep that object to pass to step 2. FILE mode: save that
-                 object to a JSON file (raw, no wrapper) and keep its absolute path for step 2.
+               • The script runs in PAGE CONTEXT — it is plain page JavaScript, NOT Node.
+                 There is no filesystem (no require, no fs) inside the page; do not expect it
+                 to write files by itself.
+               • INLINE mode: the script returns an object shaped { html, elements: [...] }.
+                 Keep that object to pass to step 2.
+               • FILE mode: the script ALSO runs in the page. When this server has a local
+                 frap ingest endpoint configured, the script is an async function that POSTs
+                 the snapshot to that local frap endpoint and returns ONLY
+                 { snapshot_path: "<abs path>" }. frap writes the big { html, elements } JSON
+                 to disk for you; you hand that snapshot_path straight to step 2 and the big
+                 snapshot never enters your context.
+               • How to run it in FILE mode, by client:
+                 - chrome-devtools-mcp: evaluate_script with this function. You may also pass
+                   its filePath parameter so the result is written to a file too — the cleanest
+                   route, and it sidesteps CSP entirely.
+                 - playwright-mcp: browser_evaluate with the script directly, OR browser_run_code
+                   as  async (page) => await page.evaluate(<script>) .
+                 - playwright-cli: page.evaluate(<script>).
+               • FILE mode CSP fallback: if the page's connect-src blocks the fetch to
+                 localhost, the script returns the raw { html, elements } object instead. SAVE
+                 that object to a JSON file yourself (raw, no wrapper) — e.g. chrome-devtools
+                 filePath or a shell write — and pass that file's absolute path as
+                 domSnapshotPath in step 2. To allow the fetch under strict CSP you can launch
+                 the debugged Chrome with --disable-web-security, or use a Playwright context
+                 with bypassCSP. Note: localhost is a secure context, so an https page calling
+                 http://localhost is NOT blocked as mixed content — only CSP connect-src can
+                 stop it. If no ingest endpoint is configured at all, the script is simply the
+                 plain page IIFE returning { html, elements }: save it yourself and pass the
+                 path as domSnapshotPath.
           2. frap_build_element_map
                • INLINE mode: pass the snapshot OBJECT as 'domSnapshot'. FILE mode: pass the
                  snapshot FILE PATH as 'domSnapshotPath'.

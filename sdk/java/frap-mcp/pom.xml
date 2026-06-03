@@ -34,6 +34,7 @@
         <module>frap-mcp-tools</module>
         <module>frap-mcp-stdio</module>
         <module>frap-mcp-http</module>
+        <module>frap-mcp-http-local</module>
     </modules>
 
     <dependencyManagement>

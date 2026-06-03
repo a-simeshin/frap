@@ -22,6 +22,10 @@
         <!-- E2E suite: Playwright browser + frap-core-rpc + demo site on :3000 -->
         <junit.groups>e2e</junit.groups>
         <frap.core.bin>${project.basedir}/../../../crates/target/release/frap-core-rpc</frap.core.bin>
+        <!-- Real built file-mode MCP+ingest fat jar, used by SnapshotScriptCrossClientE2eTest.
+             Built by `mvn -pl frap-mcp-http-local package` in sdk/java (the reactor bundles
+             frap-core-rpc into it during package). -->
+        <frap.http.local.jar>${project.basedir}/../../../sdk/java/frap-mcp/frap-mcp-http-local/target/frap-mcp-http-local.jar</frap.http.local.jar>
     </properties>
 
     <dependencies>
@@ -37,6 +41,13 @@
             <groupId>com.microsoft.playwright</groupId>
             <artifactId>playwright</artifactId>
             <version>${playwright.version}</version>
+        </dependency>
+
+        <!-- Jackson: parse MCP JSON-RPC / ingest responses in the cross-client e2e -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <scope>test</scope>
         </dependency>
 
         <!-- JUnit -->
@@ -73,6 +84,7 @@
                     <systemPropertyVariables>
                         <frap.reportDir>${project.build.directory}/frap-reports/conference</frap.reportDir>
                         <test.server.url>${test.server.url}</test.server.url>
+                        <frap.http.local.jar>${frap.http.local.jar}</frap.http.local.jar>
                     </systemPropertyVariables>
                     <environmentVariables>
                         <FRAP_CORE_BIN>${frap.core.bin}</FRAP_CORE_BIN>
