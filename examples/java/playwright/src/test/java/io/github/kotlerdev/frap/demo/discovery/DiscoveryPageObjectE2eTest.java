@@ -106,7 +106,7 @@ class DiscoveryPageObjectE2eTest {
         assertThat(Files.readString(source))
             .contains("package com.example.pages")
             .contains("public class CatalogPage")
-            .contains("page.locator");
+            .contains("public Locator ");
 
         assertCompiles(source);
     }

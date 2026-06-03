@@ -159,6 +159,10 @@ mod tests {
                 text_content: Some("Pay".to_string()),
                 path: vec!["button:submit".to_string()],
                 position_in_parent: None,
+                visible: None,
+                computed_role: None,
+                accessible_name: None,
+                scope_hint: None,
             }],
         }
     }
@@ -238,6 +242,10 @@ mod tests {
                         "a:-".to_string(),
                     ],
                     position_in_parent: None,
+                    visible: None,
+                    computed_role: None,
+                    accessible_name: None,
+                    scope_hint: None,
                 }],
             },
             min_confidence: Some(0.7),
@@ -314,6 +322,10 @@ mod tests {
                     text_content: Some("Pay".to_string()),
                     path: vec!["button:submit".to_string()],
                     position_in_parent: None,
+                    visible: None,
+                    computed_role: None,
+                    accessible_name: None,
+                    scope_hint: None,
                 },
                 DOMElementInfo {
                     selector: "[data-testid='pay-b']".to_string(),
@@ -322,6 +334,10 @@ mod tests {
                     text_content: Some("Pay".to_string()),
                     path: vec!["button:submit".to_string()],
                     position_in_parent: None,
+                    visible: None,
+                    computed_role: None,
+                    accessible_name: None,
+                    scope_hint: None,
                 },
             ],
         };

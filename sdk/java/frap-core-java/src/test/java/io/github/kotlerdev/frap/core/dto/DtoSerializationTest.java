@@ -240,4 +240,57 @@ class DtoSerializationTest {
         HealingSemantics parsed = objectMapper.readValue(json, HealingSemantics.class);
         assertThat(parsed.outcome()).isEqualTo(HealOutcome.HEALED);
     }
+
+    @Test
+    void testLocatorRecommendationDeserializesValueField() throws JsonProcessingException {
+        String json = "{\"selector\":\"[href=\\\"/x\\\"]\",\"strategy\":\"href\",\"confidence\":0.85,\"value\":\"/x\"}";
+
+        LocatorRecommendation parsed = objectMapper.readValue(json, LocatorRecommendation.class);
+
+        assertThat(parsed.selector()).isEqualTo("[href=\"/x\"]");
+        assertThat(parsed.strategy()).isEqualTo("href");
+        assertThat(parsed.confidence()).isEqualTo(0.85);
+        assertThat(parsed.value()).isEqualTo("/x");
+    }
+
+    @Test
+    void testLocatorRecommendationWithoutValueFieldIsBackwardCompatible() throws JsonProcessingException {
+        String json = "{\"selector\":\"button.cta\",\"strategy\":\"css\",\"confidence\":0.4}";
+
+        LocatorRecommendation parsed = objectMapper.readValue(json, LocatorRecommendation.class);
+
+        assertThat(parsed.selector()).isEqualTo("button.cta");
+        assertThat(parsed.strategy()).isEqualTo("css");
+        assertThat(parsed.confidence()).isEqualTo(0.4);
+        assertThat(parsed.value()).isNull();
+    }
+
+    @Test
+    void testLocatorRecommendationDeserializesPipelineFields() throws JsonProcessingException {
+        String json = "{\"selector\":\"button.cta\",\"strategy\":\"css\",\"confidence\":0.4,"
+            + "\"value\":\"buy\",\"scope\":\"#cart\",\"filter_text\":\"Buy now\",\"match_count\":3}";
+
+        LocatorRecommendation parsed = objectMapper.readValue(json, LocatorRecommendation.class);
+
+        assertThat(parsed.selector()).isEqualTo("button.cta");
+        assertThat(parsed.strategy()).isEqualTo("css");
+        assertThat(parsed.confidence()).isEqualTo(0.4);
+        assertThat(parsed.value()).isEqualTo("buy");
+        assertThat(parsed.scope()).isEqualTo("#cart");
+        assertThat(parsed.filterText()).isEqualTo("Buy now");
+        assertThat(parsed.matchCount()).isEqualTo(3);
+    }
+
+    @Test
+    void testLocatorRecommendationWithoutPipelineFieldsIsBackwardCompatible() throws JsonProcessingException {
+        String json = "{\"selector\":\"button.cta\",\"strategy\":\"css\",\"confidence\":0.4,\"value\":\"buy\"}";
+
+        LocatorRecommendation parsed = objectMapper.readValue(json, LocatorRecommendation.class);
+
+        assertThat(parsed.selector()).isEqualTo("button.cta");
+        assertThat(parsed.value()).isEqualTo("buy");
+        assertThat(parsed.scope()).isNull();
+        assertThat(parsed.filterText()).isNull();
+        assertThat(parsed.matchCount()).isNull();
+    }
 }

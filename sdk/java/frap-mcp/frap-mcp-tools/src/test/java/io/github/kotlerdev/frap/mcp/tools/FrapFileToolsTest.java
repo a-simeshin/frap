@@ -91,10 +91,10 @@ class FrapFileToolsTest {
     private static ElementMap sampleMap() {
         final ElementNode rowOne = new ElementNode(
             "row-1", "tr:nth-child(1)", "tr:nth-child(1)", "tr", null, "list-1",
-            0.91, new LocatorRecommendation("tr:nth-child(1)", "css", 0.91));
+            0.91, new LocatorRecommendation("tr:nth-child(1)", "css", 0.91, null, null, null, null));
         final ElementNode submit = new ElementNode(
             "submit", "#submit", "#submit", "button", null, "single-1",
-            0.88, new LocatorRecommendation("#submit", "id", 0.88));
+            0.88, new LocatorRecommendation("#submit", "id", 0.88, null, null, null, null));
 
         final Cluster listCluster = new Cluster(
             "list-1", ClusterType.LIST, List.of("row-1"), "tr", "tr", "tbody > tr");
@@ -191,7 +191,7 @@ class FrapFileToolsTest {
         final FilterSpec filter = new FilterSpec(true, 1, List.of("button"));
         final ElementNode onlyButton = new ElementNode(
             "submit", "#submit", "#submit", "button", null, "single-1",
-            0.88, new LocatorRecommendation("#submit", "id", 0.88));
+            0.88, new LocatorRecommendation("#submit", "id", 0.88, null, null, null, null));
         final Cluster singleCluster = new Cluster(
             "single-1", ClusterType.SINGLE, List.of("submit"), "button", "button", "#submit");
         final ElementMap filtered = new ElementMap(List.of(onlyButton), List.of(singleCluster), null);

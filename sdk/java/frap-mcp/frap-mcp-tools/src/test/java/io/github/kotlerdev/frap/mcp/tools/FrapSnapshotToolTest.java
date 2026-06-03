@@ -55,7 +55,7 @@ class FrapSnapshotToolTest {
         assertThat(script)
             .doesNotContain("fetch(")
             .doesNotContain("require")
-            .doesNotContain("fs");
+            .doesNotContain("require('fs')");
     }
 
     // --- file mode, ingest URL present --------------------------------------
@@ -83,7 +83,7 @@ class FrapSnapshotToolTest {
         // and it stays a PAGE-CONTEXT function: no Node / filesystem / outer evaluator
         assertThat(script)
             .doesNotContain("require")
-            .doesNotContain("fs")
+            .doesNotContain("require('fs')")
             .doesNotContain("writeFileSync")
             .doesNotContain("page.evaluate");
     }

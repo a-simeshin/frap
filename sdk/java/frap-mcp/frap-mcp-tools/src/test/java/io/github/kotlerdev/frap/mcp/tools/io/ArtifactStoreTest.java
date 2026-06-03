@@ -61,13 +61,13 @@ class ArtifactStoreTest {
     private static ElementMap sampleMap() {
         final ElementNode rowOne = new ElementNode(
             "row-1", "tr:nth-child(1)", "tr:nth-child(1)", "tr", null, "list-1",
-            0.91, new LocatorRecommendation("tr:nth-child(1)", "css", 0.91));
+            0.91, new LocatorRecommendation("tr:nth-child(1)", "css", 0.91, null, null, null, null));
         final ElementNode rowTwo = new ElementNode(
             "row-2", "tr:nth-child(2)", "tr:nth-child(2)", "tr", null, "list-1",
-            0.85, new LocatorRecommendation("tr:nth-child(2)", "css", 0.85));
+            0.85, new LocatorRecommendation("tr:nth-child(2)", "css", 0.85, null, null, null, null));
         final ElementNode submit = new ElementNode(
             "submit", "#submit", "#submit", "button", null, "single-1",
-            0.70, new LocatorRecommendation("#submit", "id", 0.70));
+            0.70, new LocatorRecommendation("#submit", "id", 0.70, null, null, null, null));
 
         final Cluster listCluster = new Cluster(
             "list-1", ClusterType.LIST, List.of("row-1", "row-2"), "tr", "tr", "tbody > tr");

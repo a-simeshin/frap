@@ -1,0 +1,9 @@
+{
+  "total": 65,
+  "max_positional": 4,
+  "min_high_confidence": 55,
+  "min_semantic_strategy": 55,
+  "max_cluster_size": 8,
+  "min_relative_list_clusters": 1,
+  "min_scoped": 2
+}
